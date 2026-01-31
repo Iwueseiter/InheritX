@@ -1,9 +1,11 @@
 import type { Metadata, Viewport } from "next";
 import { Outfit, Geist_Mono } from "next/font/google";
-import "./globals.css";
+import "../styles/globals.css";
 import { WalletProvider } from "@/context/WalletContext";
 import { AdminAuthProvider } from "@/context/AdminAuthContext";
+import { KYCProvider } from "@/context/KYCContext";
 import { WalletModal } from "@/components/WalletModal";
+import { KYCVerificationModal } from "@/components/KYCVerificationModal";
 
 const outfit = Outfit({
   variable: "--font-outfit",
@@ -106,6 +108,14 @@ export default function RootLayout({
             <WalletModal />
           </WalletProvider>
         </AdminAuthProvider>
+        <WalletProvider>
+          <KYCProvider>
+            {/* <Navbar /> */}
+            <main className="">{children}</main>
+            <WalletModal />
+            <KYCVerificationModal />
+          </KYCProvider>
+        </WalletProvider>
       </body>
     </html>
   );
