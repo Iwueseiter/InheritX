@@ -455,15 +455,16 @@ fn test_interest_accrual() {
 
     // 6. Verify pool state
     let pool = client.get_pool_state();
-    // total_deposits should be 10,000 (initial) + 750 (interest) = 10,750
-    assert_eq!(pool.total_deposits, 10_750);
+    // total_deposits should be 10,000 (initial) + 675 (90% of 750 interest) = 10,675
+    assert_eq!(pool.total_deposits, 10_675);
     assert_eq!(pool.total_borrowed, 0);
+    assert_eq!(pool.retained_yield, 75); // 10% of 750
 
     // 7. Verify depositor can withdraw more than they put in
-    // shares = 9,000, pool_shares = 10,000, pool_deposits = 10,750
-    // amount = 9,000 * 10,750 / 10,000 = 9,675
+    // shares = 9,000, pool_shares = 10,000, pool_deposits = 10,675
+    // amount = 9,000 * 10,675 / 10,000 = 9,607
     let withdrawn = client.withdraw(&depositor, &9_000u64);
-    assert_eq!(withdrawn, 9_675u64);
+    assert_eq!(withdrawn, 9_607u64);
 }
 
 #[test]
@@ -648,7 +649,8 @@ fn test_repayment_updates_state_correctly() {
     // Verify state updates
     let pool_after = client.get_pool_state();
     assert_eq!(pool_after.total_borrowed, 0);
-    assert_eq!(pool_after.total_deposits, 10_750); // Original + interest
+    assert_eq!(pool_after.total_deposits, 10_675); // Original + 90% interest
+    assert_eq!(pool_after.retained_yield, 75); // 10% interest
 
     // Verify loan is removed
     assert!(client.get_loan(&borrower).is_none());
