@@ -90,7 +90,9 @@ async fn admin_can_fetch_revenue_metrics() {
         .expect("Request failed");
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json.get("range").and_then(|v| v.as_str()), Some("weekly"));
 
@@ -109,7 +111,9 @@ async fn admin_can_fetch_revenue_metrics() {
         .expect("Request failed");
 
     assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let json: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json.get("range").and_then(|v| v.as_str()), Some("monthly"));
 }

@@ -1267,13 +1267,14 @@ impl RevenueMetricsService {
             trunc, interval
         );
 
-        let rows = sqlx::query_as::<_, Row>(&query)
-            .fetch_all(pool)
-            .await?;
+        let rows = sqlx::query_as::<_, Row>(&query).fetch_all(pool).await?;
 
         let data = rows
             .into_iter()
-            .map(|r| RevenueMetric { date: r.date, amount: r.amount })
+            .map(|r| RevenueMetric {
+                date: r.date,
+                amount: r.amount,
+            })
             .collect();
 
         Ok(RevenueMetricsResponse {
