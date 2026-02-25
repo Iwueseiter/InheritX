@@ -1032,7 +1032,7 @@ impl InheritanceContract {
 
         // --- Payout Logic ---
         let beneficiary = plan.beneficiaries.get(index).unwrap();
-        
+
         // Calculate the base payout
         let base_payout = (plan.total_amount as u128)
             .checked_mul(beneficiary.allocation_bp as u128)
@@ -1045,7 +1045,7 @@ impl InheritanceContract {
         // Since we don't store the LendingContract address in InheritanceContract yet,
         // we assume the funds are sitting in the contract (vault) or we are authorized to pull them.
         let available_liquidity = plan.total_amount.saturating_sub(plan.total_loaned);
-        
+
         // In a full implementation, we would call LendingClient::withdraw_priority
         // if base_payout > available_liquidity.
         // For now, we simulate the priority payout directly if liquid funds are sufficient,
@@ -1054,11 +1054,11 @@ impl InheritanceContract {
             return Err(InheritanceError::InsufficientLiquidity);
         }
 
-        // Transfer funds to beneficiary 
+        // Transfer funds to beneficiary
         // Note: For fiat (bank_account), this would typically emit an event for off-chain processing.
         // Here, we'll try to transfer USDC if an address can be derived, or just emit an event.
         // As a simplification, we'll emit the event first.
-        
+
         // Update plan balances
         let mut updated_plan = plan.clone();
         updated_plan.total_amount = updated_plan.total_amount.saturating_sub(base_payout);

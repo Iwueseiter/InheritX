@@ -611,11 +611,11 @@ impl LendingContract {
 
         let mut pool = Self::get_pool(&env);
         pool.total_borrowed -= loan.principal;
-        
+
         // Retain 10% of interest for protocol priority payouts
         let protocol_share = interest / 10;
         let pool_share = interest - protocol_share;
-        
+
         pool.total_deposits += pool_share; // Interest increases pool value for share holders
         pool.retained_yield += protocol_share;
         Self::set_pool(&env, &pool);
@@ -667,23 +667,19 @@ impl LendingContract {
 
     /// Withdraw prioritized funds from the retained yield.
     /// Used by authorized contracts (like InheritanceContract) to fulfill priority claims.
-    pub fn withdraw_priority(
-        env: Env,
-        caller: Address,
-        amount: u64,
-    ) -> Result<u64, LendingError> {
+    pub fn withdraw_priority(env: Env, caller: Address, amount: u64) -> Result<u64, LendingError> {
         Self::require_initialized(&env)?;
         caller.require_auth();
-        
+
         // In a real implementation, we should restrict this to authorized contracts only.
         // For now, we rely on the caller being trusted or admin.
-        
+
         if amount == 0 {
             return Err(LendingError::InvalidAmount);
         }
 
         let mut pool = Self::get_pool(&env);
-        
+
         if amount > pool.retained_yield {
             return Err(LendingError::InsufficientLiquidity);
         }
