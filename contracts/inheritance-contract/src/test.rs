@@ -639,8 +639,6 @@ fn test_claim_success() {
         &beneficiaries,
     ));
 
-    let owner_balance_before = TestTokenHelper::new(&env, &token).balance(&owner);
-
     // Claim should succeed and log an event, we now also test if transferring would work if we had the code implemented fully.
     // NOTE: In the current MVP setup for inheritance-contract, we modified claim_inheritance_plan
     // to emit the event with the payout amount. In a real integration test with the lending contract,
