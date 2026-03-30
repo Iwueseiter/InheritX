@@ -1072,7 +1072,7 @@ fn test_no_late_fees_during_grace_period() {
         &1_000u64,
         &collateral_addr,
         &1_500u64,
-        &(1 * 24 * 60 * 60),
+        &(24 * 60 * 60),
     );
 
     // Jump to just after due date (within grace period)
@@ -1109,7 +1109,7 @@ fn test_late_fees_after_grace_period() {
     client.deposit(&depositor, &10_000u64);
 
     // Set grace period to 1 day and late fee to 5% per day for easier testing
-    client.set_grace_period(&admin, &(1 * 24 * 60 * 60));
+    client.set_grace_period(&admin, &(24 * 60 * 60));
     client.set_late_fee_rate(&admin, &500u32); // 5% per day
 
     // Borrow 10,000 (so late fees are 500 per day)
@@ -1118,7 +1118,7 @@ fn test_late_fees_after_grace_period() {
         &10_000u64,
         &collateral_addr,
         &15_000u64,
-        &(1 * 24 * 60 * 60), // 1 day duration
+        &(24 * 60 * 60), // 1 day duration
     );
 
     // Jump to 3 days after due date (2 days past grace period)
@@ -1161,7 +1161,7 @@ fn test_liquidation_blocked_during_grace_period() {
         &5_000u64,
         &collateral_addr,
         &6_000u64, // Just barely above 150% collateral ratio
-        &(1 * 24 * 60 * 60),
+        &(24 * 60 * 60),
     );
 
     // Even though health factor might be bad, liquidation should fail during grace period
@@ -1193,7 +1193,7 @@ fn test_late_fee_collected_on_repay() {
     client.deposit(&depositor, &10_000u64);
 
     // Set simple rates for testing
-    client.set_grace_period(&admin, &(1 * 24 * 60 * 60));
+    client.set_grace_period(&admin, &(24 * 60 * 60));
     client.set_late_fee_rate(&admin, &500u32); // 5% per day
 
     // Borrow 5000
@@ -1202,7 +1202,7 @@ fn test_late_fee_collected_on_repay() {
         &5_000u64,
         &collateral_addr,
         &7_500u64,
-        &(1 * 24 * 60 * 60),
+        &(24 * 60 * 60),
     );
 
     // Jump 3 days (1 day grace + 2 days late)
@@ -1254,7 +1254,7 @@ fn test_grace_period_expires_correctly() {
         &1_000u64,
         &collateral_addr,
         &1_500u64,
-        &(1 * 24 * 60 * 60),
+        &(24 * 60 * 60),
     );
 
     // At 1.5 days: should be in grace period
@@ -1288,7 +1288,7 @@ fn test_multiple_loans_grace_period() {
     mint_to(&env, &token_addr, &borrower1, 100_000);
     mint_to(&env, &token_addr, &borrower2, 100_000);
 
-    client.set_grace_period(&admin, &(1 * 24 * 60 * 60));
+    client.set_grace_period(&admin, &(24 * 60 * 60));
 
     // Create two loans with different maturities
     client.borrow(
@@ -1296,7 +1296,7 @@ fn test_multiple_loans_grace_period() {
         &1_000u64,
         &collateral_addr,
         &1_500u64,
-        &(1 * 24 * 60 * 60),
+        &(24 * 60 * 60),
     );
 
     env.ledger().set_timestamp(env.ledger().timestamp() + 1_000);
