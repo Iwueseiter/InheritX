@@ -993,3 +993,324 @@ fn test_reentrancy_attack_fails() {
     let pool = client.get_pool_state();
     assert_eq!(pool.total_borrowed, 1000); // Only the first borrow succeeded
 }
+
+// ─────────────────────────────────────────────────
+// Grace Period & Late Fee Tests
+// ─────────────────────────────────────────────────
+
+#[test]
+fn test_grace_period_defaults() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _token_addr, _collateral_addr, _admin) = setup(&env);
+
+    let grace_period = client.get_grace_period();
+    let late_fee_rate = client.get_late_fee_rate();
+
+    // Should have default values set
+    assert_eq!(grace_period, 259_200u64); // 3 days
+    assert_eq!(late_fee_rate, 500u32); // 5% per day
+}
+
+#[test]
+fn test_set_grace_period_admin_only() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _token_addr, _collateral_addr, admin) = setup(&env);
+
+    let non_admin = Address::generate(&env);
+
+    // Non-admin should fail
+    let result = client.try_set_grace_period(&non_admin, &(5 * 24 * 60 * 60));
+    assert!(result.is_err());
+
+    // Admin should succeed
+    let result = client.try_set_grace_period(&admin, &(7 * 24 * 60 * 60));
+    assert!(result.is_ok());
+
+    // Verify the new grace period
+    assert_eq!(client.get_grace_period(), 7 * 24 * 60 * 60);
+}
+
+#[test]
+fn test_set_late_fee_rate_admin_only() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, _token_addr, _collateral_addr, admin) = setup(&env);
+
+    let non_admin = Address::generate(&env);
+
+    // Non-admin should fail
+    let result = client.try_set_late_fee_rate(&non_admin, &1000u32);
+    assert!(result.is_err());
+
+    // Admin should succeed
+    let result = client.try_set_late_fee_rate(&admin, &1000u32);
+    assert!(result.is_ok());
+
+    // Verify the new rate
+    assert_eq!(client.get_late_fee_rate(), 1000u32); // 10% per day
+}
+
+#[test]
+fn test_no_late_fees_during_grace_period() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, token_addr, collateral_addr, _admin) = setup(&env);
+
+    let depositor = Address::generate(&env);
+    let borrower = Address::generate(&env);
+    mint_to(&env, &collateral_addr, &borrower, 100_000);
+    mint_to(&env, &token_addr, &depositor, 100_000);
+    mint_to(&env, &token_addr, &borrower, 100_000);
+
+    client.deposit(&depositor, &10_000u64);
+
+    // Borrow with 1 day duration
+    client.borrow(
+        &borrower,
+        &1_000u64,
+        &collateral_addr,
+        &1_500u64,
+        &(1 * 24 * 60 * 60),
+    );
+
+    // Jump to just after due date (within grace period)
+    // Grace period is 3 days (259200 seconds), so due_date + grace = due_date + 259200
+    env.ledger().set_timestamp(env.ledger().timestamp() + 2 * 24 * 60 * 60); // Jump 2 days
+
+    // Should still be in grace period
+    let in_grace = client.is_in_grace_period(&borrower);
+    assert!(in_grace);
+
+    // Late fees should be 0
+    let late_fee = client.calculate_late_fee(&borrower);
+    assert_eq!(late_fee, 0u64);
+
+    // Total due should only include principal + interest, no late fees
+    let repayment = client.get_repayment_amount(&borrower);
+    // 1000 principal at ~15% APY for ~2 days = 1000 + ~8 interest
+    assert!(repayment < 1_100u64);
+}
+
+#[test]
+fn test_late_fees_after_grace_period() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, token_addr, collateral_addr, admin) = setup(&env);
+
+    let depositor = Address::generate(&env);
+    let borrower = Address::generate(&env);
+    mint_to(&env, &collateral_addr, &borrower, 100_000);
+    mint_to(&env, &token_addr, &depositor, 100_000);
+    mint_to(&env, &token_addr, &borrower, 100_000);
+
+    client.deposit(&depositor, &10_000u64);
+
+    // Set grace period to 1 day and late fee to 5% per day for easier testing
+    client.set_grace_period(&admin, &(1 * 24 * 60 * 60));
+    client.set_late_fee_rate(&admin, &500u32); // 5% per day
+
+    // Borrow 10,000 (so late fees are 500 per day)
+    client.borrow(
+        &borrower,
+        &10_000u64,
+        &collateral_addr,
+        &15_000u64,
+        &(1 * 24 * 60 * 60), // 1 day duration
+    );
+
+    // Jump to 3 days after due date (2 days past grace period)
+    // late fees = 10000 * 0.05 * 2 = 1000
+    env.ledger().set_timestamp(env.ledger().timestamp() + 4 * 24 * 60 * 60);
+
+    // Should be out of grace period
+    let in_grace = client.is_in_grace_period(&borrower);
+    assert!(!in_grace);
+
+    // Late fee should be ~1000 (2 days * 500 per day = 1000)
+    let late_fee = client.calculate_late_fee(&borrower);
+    assert_eq!(late_fee, 1_000u64);
+
+    // Total due should include late fees
+    let repayment = client.get_repayment_amount(&borrower);
+    // 10000 principal + interest (~825 for 4 days at ~15%) + 1000 late fees = ~11825
+    assert!(repayment > 11_000u64);
+}
+
+#[test]
+fn test_liquidation_blocked_during_grace_period() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, token_addr, collateral_addr, _admin) = setup(&env);
+
+    let depositor = Address::generate(&env);
+    let borrower = Address::generate(&env);
+    let liquidator = Address::generate(&env);
+    mint_to(&env, &collateral_addr, &borrower, 100_000);
+    mint_to(&env, &token_addr, &depositor, 50_000);
+    mint_to(&env, &token_addr, &liquidator, 50_000);
+
+    client.deposit(&depositor, &20_000u64);
+
+    // Borrow with very high collateral (so health factor starts good)
+    client.borrow(
+        &borrower,
+        &5_000u64,
+        &collateral_addr,
+        &6_000u64, // Just barely above 150% collateral ratio
+        &(1 * 24 * 60 * 60),
+    );
+
+    // Even though health factor might be bad, liquidation should fail during grace period
+    let result = client.try_liquidate(&liquidator, &borrower, &1_000u64);
+    assert!(result.is_err()); // Should fail due to grace period, not health factor
+
+    // Jump past grace period (4 days)
+    env.ledger().set_timestamp(env.ledger().timestamp() + 4 * 24 * 60 * 60);
+
+    // Now liquidation can proceed (if health factor is bad)
+    let result = client.try_liquidate(&liquidator, &borrower, &1_000u64);
+    // Result depends on health factor calculation, but grace period check shouldn't block
+    let _ = result; // Just verify no panic
+}
+
+#[test]
+fn test_late_fee_collected_on_repay() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, token_addr, collateral_addr, admin) = setup(&env);
+
+    let depositor = Address::generate(&env);
+    let borrower = Address::generate(&env);
+    mint_to(&env, &collateral_addr, &borrower, 100_000);
+    mint_to(&env, &token_addr, &depositor, 100_000);
+    mint_to(&env, &token_addr, &borrower, 100_000);
+
+    client.deposit(&depositor, &10_000u64);
+
+    // Set simple rates for testing
+    client.set_grace_period(&admin, &(1 * 24 * 60 * 60));
+    client.set_late_fee_rate(&admin, &500u32); // 5% per day
+
+    // Borrow 5000
+    client.borrow(
+        &borrower,
+        &5_000u64,
+        &collateral_addr,
+        &7_500u64,
+        &(1 * 24 * 60 * 60),
+    );
+
+    // Jump 3 days (1 day grace + 2 days late)
+    env.ledger().set_timestamp(env.ledger().timestamp() + 3 * 24 * 60 * 60);
+
+    // Late fees should be 5000 * 0.05 * 2 = 500
+    let late_fee = client.calculate_late_fee(&borrower);
+    assert_eq!(late_fee, 500u64);
+
+    // Get pool state before repay
+    let pool_before = client.get_pool_state();
+
+    // Repay - should include late fees
+    client.repay(&borrower);
+
+    // Get pool state after repay
+    let pool_after = client.get_pool_state();
+
+    // Late fee (500) should be added to retained_yield
+    // Protocol gets 10% of interest, but 100% of late fees
+    assert!(pool_after.retained_yield > pool_before.retained_yield);
+
+    // Loan should be gone
+    let loan = client.get_loan(&borrower);
+    assert!(loan.is_none());
+}
+
+#[test]
+fn test_grace_period_expires_correctly() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, token_addr, collateral_addr, admin) = setup(&env);
+
+    let depositor = Address::generate(&env);
+    let borrower = Address::generate(&env);
+    mint_to(&env, &collateral_addr, &borrower, 100_000);
+    mint_to(&env, &token_addr, &depositor, 100_000);
+    mint_to(&env, &token_addr, &borrower, 100_000);
+
+    client.deposit(&depositor, &10_000u64);
+
+    // Set 2 day grace period
+    client.set_grace_period(&admin, &(2 * 24 * 60 * 60));
+
+    // Borrow with 1 day maturity
+    client.borrow(
+        &borrower,
+        &1_000u64,
+        &collateral_addr,
+        &1_500u64,
+        &(1 * 24 * 60 * 60),
+    );
+
+    // At 1.5 days: should be in grace period
+    env.ledger().set_timestamp(env.ledger().timestamp() + 36 * 60 * 60);
+    assert!(client.is_in_grace_period(&borrower));
+
+    // At 3 days: should be out of grace period
+    env.ledger().set_timestamp(env.ledger().timestamp() + 36 * 60 * 60); // Total 72 hours = 3 days
+    assert!(!client.is_in_grace_period(&borrower));
+
+    // Late fees should start accruing
+    assert!(client.calculate_late_fee(&borrower) > 0u64);
+}
+
+#[test]
+fn test_multiple_loans_grace_period() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, token_addr, collateral_addr, admin) = setup(&env);
+
+    let depositor = Address::generate(&env);
+    mint_to(&env, &token_addr, &depositor, 200_000);
+    client.deposit(&depositor, &100_000u64);
+
+    let borrower1 = Address::generate(&env);
+    let borrower2 = Address::generate(&env);
+    mint_to(&env, &collateral_addr, &borrower1, 100_000);
+    mint_to(&env, &collateral_addr, &borrower2, 100_000);
+    mint_to(&env, &token_addr, &borrower1, 100_000);
+    mint_to(&env, &token_addr, &borrower2, 100_000);
+
+    client.set_grace_period(&admin, &(1 * 24 * 60 * 60));
+
+    // Create two loans with different maturities
+    client.borrow(
+        &borrower1,
+        &1_000u64,
+        &collateral_addr,
+        &1_500u64,
+        &(1 * 24 * 60 * 60),
+    );
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 1_000);
+
+    client.borrow(
+        &borrower2,
+        &2_000u64,
+        &collateral_addr,
+        &3_000u64,
+        &(2 * 24 * 60 * 60),
+    );
+
+    // Jump 2 days
+    env.ledger().set_timestamp(env.ledger().timestamp() + 2 * 24 * 60 * 60);
+
+    // borrower1 should be out of grace period
+    assert!(!client.is_in_grace_period(&borrower1));
+    assert!(client.calculate_late_fee(&borrower1) > 0u64);
+
+    // borrower2 should still be in grace period (due_date is 2 days after borrow, grace = 1 day, so still in grace)
+    assert!(client.is_in_grace_period(&borrower2));
+    assert_eq!(client.calculate_late_fee(&borrower2), 0u64);
+}

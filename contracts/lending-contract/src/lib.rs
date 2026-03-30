@@ -11,6 +11,8 @@ use soroban_sdk::{
 const MINIMUM_LIQUIDITY: u64 = 1000;
 const PROTOCOL_INTEREST_BPS: u32 = 1000; // 10% of interest retained by protocol
 const BAD_DEBT_RESERVE_BPS: u32 = 5000; // 50% of protocol share routed to reserve
+const DEFAULT_GRACE_PERIOD_SECONDS: u64 = 259_200; // 3 days
+const DEFAULT_LATE_FEE_RATE_BPS: u32 = 500; // 5% per day = 0.058% per second (approx)
 
 // ─────────────────────────────────────────────────
 // Data Types
@@ -27,6 +29,8 @@ pub struct PoolState {
     pub utilization_cap_bps: u32, // Maximum utilization allowed in basis points (e.g., 8000 = 80%)
     pub retained_yield: u64, // Yield reserved for protocol/priority payouts
     pub bad_debt_reserve: u64, // Reserve bucket for bad debt coverage
+    pub grace_period_seconds: u64, // Grace period duration in seconds (e.g., 3 days = 259200)
+    pub late_fee_rate_bps: u32, // Late fee rate in basis points per day (e.g., 500 = 5% per day)
 }
 
 const SECONDS_IN_YEAR: u64 = 31_536_000;
@@ -144,6 +148,17 @@ pub struct InterestAccrualEvent {
     pub timestamp: u64,
 }
 
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LateFeeChargedEvent {
+    pub loan_id: u64,
+    pub borrower: Address,
+    pub late_fee: u64,
+    pub days_overdue: u64,
+    pub total_with_late_fees: u64,
+    pub timestamp: u64,
+}
+
 // ─────────────────────────────────────────────────
 // Errors
 // ─────────────────────────────────────────────────
@@ -185,6 +200,7 @@ pub enum DataKey {
     WhitelistedCollateral(Address),
     NFTToken,
     ReentrancyGuard,
+    LateFeesAccrued(u64), // Track late fees for a specific loan_id
 }
 
 // ─────────────────────────────────────────────────
@@ -229,6 +245,8 @@ impl LendingContract {
                 utilization_cap_bps,
                 retained_yield: 0,
                 bad_debt_reserve: 0,
+                grace_period_seconds: DEFAULT_GRACE_PERIOD_SECONDS,
+                late_fee_rate_bps: DEFAULT_LATE_FEE_RATE_BPS,
             },
         );
         Ok(())
@@ -677,7 +695,8 @@ impl LendingContract {
 
     /// Repay the full outstanding loan for the caller.
     /// Restores liquidity to the pool, returns collateral, and closes the loan record.
-    /// Returns the total amount repaid (principal + interest).
+    /// Includes principal, interest, and any accumulated late fees in the repayment.
+    /// Returns the total amount repaid (principal + interest + late fees).
     pub fn repay(env: Env, borrower: Address) -> Result<u64, LendingError> {
         Self::require_initialized(&env)?;
         Self::enter_reentrancy_guard(&env)?;
@@ -691,7 +710,8 @@ impl LendingContract {
 
         let elapsed = env.ledger().timestamp().saturating_sub(loan.borrow_time);
         let interest = Self::calculate_interest(loan.principal, loan.interest_rate_bps, elapsed);
-        let total_repayment = loan.principal + interest;
+        let late_fee = Self::calculate_late_fee(env.clone(), borrower.clone())?;
+        let total_repayment = loan.principal + interest + late_fee;
 
         let token = Self::get_token(&env);
         let contract_id = env.current_contract_address();
@@ -721,8 +741,9 @@ impl LendingContract {
         let retained_share = protocol_share.saturating_sub(reserve_share);
         let pool_share = interest - protocol_share;
 
+        // Late fees go entirely to retained_yield (protocol reserve)
         pool.total_deposits += pool_share; // Interest increases pool value for share holders
-        pool.retained_yield += retained_share;
+        pool.retained_yield += retained_share + late_fee;
         pool.bad_debt_reserve += reserve_share;
         Self::set_pool(&env, &pool);
 
@@ -732,11 +753,33 @@ impl LendingContract {
         env.storage()
             .persistent()
             .remove(&DataKey::LoanById(loan.loan_id));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::LateFeesAccrued(loan.loan_id));
 
         // Burn NFT if token is set
         if let Some(nft_token) = Self::get_nft_token(&env) {
             let nft_client = LoanNFTClient::new(&env, &nft_token);
             nft_client.burn(&loan.loan_id);
+        }
+
+        // Emit late fee event if any late fees were charged
+        if late_fee > 0 {
+            let current_time = env.ledger().timestamp();
+            let grace_period_end = loan.due_date + pool.grace_period_seconds;
+            let days_overdue = (current_time - grace_period_end) / (24 * 60 * 60);
+
+            env.events().publish(
+                (symbol_short!("POOL"), symbol_short!("LATEFEE")),
+                LateFeeChargedEvent {
+                    loan_id: loan.loan_id,
+                    borrower: borrower.clone(),
+                    late_fee,
+                    days_overdue,
+                    total_with_late_fees: total_repayment,
+                    timestamp: current_time,
+                },
+            );
         }
 
         env.events().publish(
@@ -752,27 +795,29 @@ impl LendingContract {
         );
         log!(
             &env,
-            "Loan {} repaid: {} total ({} principal + {} interest), {} collateral returned",
+            "Loan {} repaid: {} total ({} principal + {} interest + {} late fees), {} collateral returned",
             loan.loan_id,
             total_repayment,
             loan.principal,
             interest,
+            late_fee,
             loan.collateral_amount
         );
         Self::exit_reentrancy_guard(&env);
         Ok(total_repayment)
     }
 
-    /// Calculate the total amount (principal + interest) required to repay the loan.
+    /// Calculate the total amount (principal + interest + late fees) required to repay the loan.
     pub fn get_repayment_amount(env: Env, borrower: Address) -> Result<u64, LendingError> {
-        let loan_opt: Option<LoanRecord> = env.storage().persistent().get(&DataKey::Loan(borrower));
+        let loan_opt: Option<LoanRecord> = env.storage().persistent().get(&DataKey::Loan(borrower.clone()));
 
         match loan_opt {
             Some(loan) => {
                 let elapsed = env.ledger().timestamp().saturating_sub(loan.borrow_time);
                 let interest =
                     Self::calculate_interest(loan.principal, loan.interest_rate_bps, elapsed);
-                Ok(loan.principal + interest)
+                let late_fee = Self::calculate_late_fee(env, borrower)?;
+                Ok(loan.principal + interest + late_fee)
             }
             None => Err(LendingError::NoOpenLoan),
         }
@@ -901,6 +946,90 @@ impl LendingContract {
         ))
     }
 
+    // ─── Grace Period & Late Fee Functions ────────────
+
+    /// Check if a loan is currently in its grace period
+    pub fn is_in_grace_period(env: Env, borrower: Address) -> Result<bool, LendingError> {
+        Self::require_initialized(&env)?;
+
+        let loan: LoanRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Loan(borrower))
+            .ok_or(LendingError::NoOpenLoan)?;
+
+        let pool = Self::get_pool(&env);
+        let current_time = env.ledger().timestamp();
+        let grace_period_end = loan.due_date + pool.grace_period_seconds;
+
+        Ok(current_time <= grace_period_end)
+    }
+
+    /// Calculate late fees accumulated on a loan
+    /// Daily late fee rate applied to days overdue after grace period
+    pub fn calculate_late_fee(env: Env, borrower: Address) -> Result<u64, LendingError> {
+        Self::require_initialized(&env)?;
+
+        let loan: LoanRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Loan(borrower.clone()))
+            .ok_or(LendingError::NoOpenLoan)?;
+
+        let pool = Self::get_pool(&env);
+        let current_time = env.ledger().timestamp();
+        let grace_period_end = loan.due_date + pool.grace_period_seconds;
+
+        if current_time <= grace_period_end {
+            return Ok(0);
+        }
+
+        let days_overdue = (current_time - grace_period_end) / (24 * 60 * 60);
+        if days_overdue == 0 {
+            return Ok(0);
+        }
+
+        // Look up any previously accrued late fees for this loan
+        let accrued_fees: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::LateFeesAccrued(loan.loan_id))
+            .unwrap_or(0u64);
+
+        if accrued_fees > 0 {
+            return Ok(accrued_fees);
+        }
+
+        // Calculate new late fees: principal * rate_per_day * days_overdue / 10000
+        let daily_fee = ((loan.principal as u128)
+            .checked_mul(pool.late_fee_rate_bps as u128)
+            .and_then(|v| v.checked_div(10000))
+            .unwrap_or(0)) as u64;
+
+        let total_late_fee = (daily_fee as u128)
+            .checked_mul(days_overdue as u128)
+            .unwrap_or(0) as u64;
+
+        Ok(total_late_fee)
+    }
+
+    /// Get total repayment amount including principal, interest, and late fees
+    pub fn get_total_due_with_late_fees(env: Env, borrower: Address) -> Result<u64, LendingError> {
+        Self::require_initialized(&env)?;
+
+        let loan: LoanRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Loan(borrower.clone()))
+            .ok_or(LendingError::NoOpenLoan)?;
+
+        let elapsed = env.ledger().timestamp().saturating_sub(loan.borrow_time);
+        let interest = Self::calculate_interest(loan.principal, loan.interest_rate_bps, elapsed);
+        let late_fee = Self::calculate_late_fee(env, borrower)?;
+
+        Ok(loan.principal + interest + late_fee)
+    }
+
     // ─── Admin Functions ─────────────────────────────
 
     /// Whitelist a collateral token (admin only)
@@ -935,8 +1064,54 @@ impl LendingContract {
         Self::get_collateral_ratio(&env)
     }
 
+    /// Set the grace period for loans (admin only)
+    /// Grace period is the time after due date during which no late fees accrue
+    pub fn set_grace_period(
+        env: Env,
+        admin: Address,
+        grace_period_seconds: u64,
+    ) -> Result<(), LendingError> {
+        Self::require_admin(&env, &admin)?;
+
+        let mut pool = Self::get_pool(&env);
+        pool.grace_period_seconds = grace_period_seconds;
+        Self::set_pool(&env, &pool);
+
+        log!(&env, "Grace period updated to {} seconds", grace_period_seconds);
+        Ok(())
+    }
+
+    /// Set the late fee rate for loans (admin only)
+    /// Late fee rate is in basis points per day (e.g., 500 = 5% per day)
+    pub fn set_late_fee_rate(
+        env: Env,
+        admin: Address,
+        late_fee_rate_bps: u32,
+    ) -> Result<(), LendingError> {
+        Self::require_admin(&env, &admin)?;
+
+        let mut pool = Self::get_pool(&env);
+        pool.late_fee_rate_bps = late_fee_rate_bps;
+        Self::set_pool(&env, &pool);
+
+        log!(&env, "Late fee rate updated to {} bps per day", late_fee_rate_bps);
+        Ok(())
+    }
+
+    /// Get the current grace period in seconds
+    pub fn get_grace_period(env: Env) -> u64 {
+        let pool = Self::get_pool(&env);
+        pool.grace_period_seconds
+    }
+
+    /// Get the current late fee rate in basis points per day
+    pub fn get_late_fee_rate(env: Env) -> u32 {
+        let pool = Self::get_pool(&env);
+        pool.late_fee_rate_bps
+    }
+
     /// Liquidate an underwater loan by paying part of the debt and seizing collateral
-    /// Only callable if the loan's health factor is below a safe threshold
+    /// Only callable if the loan's health factor is below a safe threshold AND grace period has expired
     pub fn liquidate(
         env: Env,
         liquidator: Address,
@@ -954,6 +1129,12 @@ impl LendingContract {
             .ok_or(LendingError::NoOpenLoan)?;
 
         if amount == 0 || amount > loan.principal {
+            return Err(LendingError::InvalidAmount);
+        }
+
+        // Check if grace period has expired before allowing liquidation
+        let is_in_grace = Self::is_in_grace_period(env.clone(), borrower.clone())?;
+        if is_in_grace {
             return Err(LendingError::InvalidAmount);
         }
 
