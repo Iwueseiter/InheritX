@@ -91,12 +91,12 @@ pub struct LoanMetadata {
 pub struct LoanInsurance {
     pub loan_id: u64,
     pub borrower: Address,
-    pub coverage_amount: u64,    // Coverage limit (typically 100% of loan principal)
-    pub premium_paid: u64,       // Premium amount paid upfront
-    pub premium_rate_bps: u32,   // Premium rate in basis points (e.g., 200 = 2%)
-    pub purchase_time: u64,      // Timestamp when insurance was purchased
-    pub expires_at: u64,         // Expiration timestamp (typically loan due date)
-    pub claimed: bool,           // Whether insurance has been claimed
+    pub coverage_amount: u64, // Coverage limit (typically 100% of loan principal)
+    pub premium_paid: u64,    // Premium amount paid upfront
+    pub premium_rate_bps: u32, // Premium rate in basis points (e.g., 200 = 2%)
+    pub purchase_time: u64,   // Timestamp when insurance was purchased
+    pub expires_at: u64,      // Expiration timestamp (typically loan due date)
+    pub claimed: bool,        // Whether insurance has been claimed
 }
 
 #[contracttype]
@@ -369,6 +369,8 @@ pub struct InsuranceClaimedEvent {
     pub claim_amount: u64,
     pub coverage_amount: u64,
     pub timestamp: u64,
+}
+
 // Interest Rate Model
 // ─────────────────────────────────────────────────
 
@@ -391,6 +393,10 @@ pub struct InsuranceCancelledEvent {
     pub loan_id: u64,
     pub borrower: Address,
     pub refund_amount: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RateModelUpdatedEvent {
     pub base_rate_bps: u32,
     pub optimal_utilization_bps: u32,
@@ -466,12 +472,12 @@ pub enum DataKey {
     UserLoans(Address),          // Track multiple loans per user (Vec<u64>)
     RewardPool(Address),         // Per-asset reward pool
     UserStake(Address, Address), // (User, Asset) staking position
-    UserLoans(Address), // Track multiple loans per user (Vec<u64>)
+    UserLoans(Address),          // Track multiple loans per user (Vec<u64>)
     RewardPool,
-    UserStake(Address), // Track user's staking position
-    Insurance(u64),            // Insurance record for a loan_id
-    InsuranceFund,             // Global insurance fund state
-    InsurancePremiumRate,      // Premium rate in basis points (default 200 = 2%)
+    UserStake(Address),   // Track user's staking position
+    Insurance(u64),       // Insurance record for a loan_id
+    InsuranceFund,        // Global insurance fund state
+    InsurancePremiumRate, // Premium rate in basis points (default 200 = 2%)
     InheritanceContract,
     GovernanceContract,
     RateModel,
@@ -621,9 +627,10 @@ impl LendingContract {
         );
 
         // Initialize insurance premium rate
-        env.storage()
-            .instance()
-            .set(&DataKey::InsurancePremiumRate, &DEFAULT_INSURANCE_PREMIUM_RATE_BPS);
+        env.storage().instance().set(
+            &DataKey::InsurancePremiumRate,
+            &DEFAULT_INSURANCE_PREMIUM_RATE_BPS,
+        );
 
         access_control::assign_role(&env, &admin, Role::Admin);
         Ok(())
@@ -678,6 +685,8 @@ impl LendingContract {
             .instance()
             .get(&DataKey::SupportedAssets)
             .unwrap_or_else(|| Vec::new(&env))
+    }
+
     /// Check whether an address holds a given role.
     pub fn has_role(env: Env, address: Address, role: Role) -> bool {
         access_control::has_role(&env, &address, role)
@@ -1056,12 +1065,6 @@ impl LendingContract {
 
     /// Deposit `amount` of the specific asset into its pool.
     /// Mints proportional pool shares to the depositor.
-    pub fn deposit(
-        env: Env,
-        depositor: Address,
-        asset: Address,
-        amount: u64,
-    ) -> Result<u64, LendingError> {
     pub fn deposit(env: Env, depositor: Address, amount: u64) -> Result<u64, LendingError> {
         Self::require_not_paused(&env)?;
         Self::require_initialized(&env)?;
@@ -1123,12 +1126,6 @@ impl LendingContract {
 
     /// Burn `shares` and return the proportional underlying tokens to the depositor.
     /// Reverts if insufficient liquidity (i.e., tokens are loaned out).
-    pub fn withdraw(
-        env: Env,
-        depositor: Address,
-        asset: Address,
-        shares: u64,
-    ) -> Result<u64, LendingError> {
     pub fn withdraw(env: Env, depositor: Address, shares: u64) -> Result<u64, LendingError> {
         Self::require_not_paused(&env)?;
         Self::require_initialized(&env)?;
@@ -1524,12 +1521,6 @@ impl LendingContract {
 
     /// Withdraw prioritized funds from the retained yield for a specific asset.
     /// Used by authorized contracts (like InheritanceContract) to fulfill priority claims.
-    pub fn withdraw_priority(
-        env: Env,
-        caller: Address,
-        asset: Address,
-        amount: u64,
-    ) -> Result<u64, LendingError> {
     pub fn withdraw_priority(env: Env, caller: Address, amount: u64) -> Result<u64, LendingError> {
         Self::require_not_paused(&env)?;
         Self::require_initialized(&env)?;
@@ -1809,12 +1800,6 @@ impl LendingContract {
         Ok(())
     }
 
-    pub fn flash_loan(
-        env: Env,
-        receiver_id: Address,
-        asset: Address,
-        amount: u64,
-    ) -> Result<(), LendingError> {
     pub fn flash_loan(env: Env, receiver_id: Address, amount: u64) -> Result<(), LendingError> {
         Self::require_not_paused(&env)?;
         Self::require_initialized(&env)?;
@@ -2992,9 +2977,10 @@ impl LendingContract {
             );
         }
         if !env.storage().instance().has(&DataKey::InsurancePremiumRate) {
-            env.storage()
-                .instance()
-                .set(&DataKey::InsurancePremiumRate, &DEFAULT_INSURANCE_PREMIUM_RATE_BPS);
+            env.storage().instance().set(
+                &DataKey::InsurancePremiumRate,
+                &DEFAULT_INSURANCE_PREMIUM_RATE_BPS,
+            );
         }
     }
 
@@ -3033,7 +3019,11 @@ impl LendingContract {
             .instance()
             .set(&DataKey::InsurancePremiumRate, &premium_rate_bps);
 
-        log!(&env, "InsurancePremiumRateUpdated: rate_bps={}", premium_rate_bps);
+        log!(
+            &env,
+            "InsurancePremiumRateUpdated: rate_bps={}",
+            premium_rate_bps
+        );
 
         Ok(())
     }
@@ -3086,7 +3076,11 @@ impl LendingContract {
         let token: Address = env.storage().instance().get(&DataKey::Token).unwrap();
         let token_client = token::Client::new(&env, &token);
 
-        token_client.transfer(&borrower, &env.current_contract_address(), &(premium as i128));
+        token_client.transfer(
+            &borrower,
+            &env.current_contract_address(),
+            &(premium as i128),
+        );
 
         // Coverage is 100% of principal
         let coverage_amount = loan.principal;
@@ -3119,9 +3113,7 @@ impl LendingContract {
         fund.total_premiums_collected = fund.total_premiums_collected.saturating_add(premium);
         fund.available_balance = fund.available_balance.saturating_add(premium);
 
-        env.storage()
-            .instance()
-            .set(&DataKey::InsuranceFund, &fund);
+        env.storage().instance().set(&DataKey::InsuranceFund, &fund);
 
         // Emit event
         env.events().publish(
@@ -3178,7 +3170,10 @@ impl LendingContract {
     }
 
     /// Get insurance details for a loan
-    pub fn get_insurance_details(env: Env, loan_id: u64) -> Result<Option<LoanInsurance>, LendingError> {
+    pub fn get_insurance_details(
+        env: Env,
+        loan_id: u64,
+    ) -> Result<Option<LoanInsurance>, LendingError> {
         let insurance_key = DataKey::Insurance(loan_id);
         Ok(env.storage().instance().get(&insurance_key))
     }
@@ -3235,9 +3230,7 @@ impl LendingContract {
         // Update insurance fund
         fund.total_claims_paid = fund.total_claims_paid.saturating_add(claim_amount);
         fund.available_balance = fund.available_balance.saturating_sub(claim_amount);
-        env.storage()
-            .instance()
-            .set(&DataKey::InsuranceFund, &fund);
+        env.storage().instance().set(&DataKey::InsuranceFund, &fund);
 
         // Transfer claim amount to contract (funds holder for protocol)
         // In a real system, this would be transferred to a claims reserve
@@ -3271,7 +3264,11 @@ impl LendingContract {
     }
 
     /// Cancel insurance and get partial refund (pro-rata based on time remaining)
-    pub fn cancel_insurance(env: Env, borrower: Address, loan_id: u64) -> Result<u64, LendingError> {
+    pub fn cancel_insurance(
+        env: Env,
+        borrower: Address,
+        loan_id: u64,
+    ) -> Result<u64, LendingError> {
         borrower.require_auth();
 
         let insurance_key = DataKey::Insurance(loan_id);
@@ -3329,9 +3326,7 @@ impl LendingContract {
                 });
 
             fund.available_balance = fund.available_balance.saturating_sub(refund_amount);
-            env.storage()
-                .instance()
-                .set(&DataKey::InsuranceFund, &fund);
+            env.storage().instance().set(&DataKey::InsuranceFund, &fund);
 
             // Transfer refund to borrower
             let token: Address = env.storage().instance().get(&DataKey::Token).unwrap();
@@ -3410,9 +3405,7 @@ impl LendingContract {
             });
 
         fund.available_balance = fund.available_balance.saturating_add(amount);
-        env.storage()
-            .instance()
-            .set(&DataKey::InsuranceFund, &fund);
+        env.storage().instance().set(&DataKey::InsuranceFund, &fund);
 
         log!(
             &env,
@@ -3450,18 +3443,12 @@ impl LendingContract {
         }
 
         fund.available_balance = fund.available_balance.saturating_sub(amount);
-        env.storage()
-            .instance()
-            .set(&DataKey::InsuranceFund, &fund);
+        env.storage().instance().set(&DataKey::InsuranceFund, &fund);
 
         // Transfer to admin
         let token: Address = env.storage().instance().get(&DataKey::Token).unwrap();
         let token_client = token::Client::new(&env, &token);
-        token_client.transfer(
-            &env.current_contract_address(),
-            &admin,
-            &(amount as i128),
-        );
+        token_client.transfer(&env.current_contract_address(), &admin, &(amount as i128));
 
         log!(
             &env,

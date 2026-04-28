@@ -606,6 +606,10 @@ pub struct PlanOwnershipTransferredEvent {
     pub old_owner: Address,
     pub new_owner: Address,
     pub transferred_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TriggerConditionType {
     Manual,
     Time,
@@ -2026,7 +2030,9 @@ impl InheritanceContract {
             if exit_remaining_after == 0 {
                 env.storage().persistent().remove(&settle_key);
             } else {
-                env.storage().persistent().set(&settle_key, &exit_remaining_after);
+                env.storage()
+                    .persistent()
+                    .set(&settle_key, &exit_remaining_after);
             }
         }
 

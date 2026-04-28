@@ -2111,6 +2111,9 @@ fn test_purchase_loan_insurance_success() {
 
 #[test]
 fn test_cannot_purchase_insurance_twice() {
+    // TODO: Implement test
+}
+
 // Interest Rate Model Tests (#489)
 // ─────────────────────────────────────────────────
 
@@ -2366,7 +2369,9 @@ fn test_get_supply_rate() {
 
     // Fund the insurance pool for claims
     mint_to(&env, &token_addr, &admin, 20_000);
-    client.deposit_to_insurance_fund(&admin, &10_000u64).unwrap();
+    client
+        .deposit_to_insurance_fund(&admin, &10_000u64)
+        .unwrap();
 
     // Jump past due date
     env.ledger().set_timestamp(due_date + 1);
@@ -2545,7 +2550,10 @@ fn test_cancel_insurance_with_refund() {
 
     // Verify fund was updated
     let fund_after_cancel = client.get_insurance_fund_state().unwrap();
-    assert_eq!(fund_after_cancel.available_balance, initial_balance - refund);
+    assert_eq!(
+        fund_after_cancel.available_balance,
+        initial_balance - refund
+    );
 }
 
 #[test]
@@ -2632,6 +2640,10 @@ fn test_unauthorized_cancel_insurance() {
 
     // Try to cancel as unauthorized user
     let result = client.try_cancel_insurance(&unauthorized_user, &0u64);
+    assert!(result.is_err());
+}
+
+#[test]
 fn test_non_admin_cannot_whitelist_collateral() {
     let env = Env::default();
     env.mock_all_auths();
@@ -2683,7 +2695,9 @@ fn test_withdraw_from_insurance_fund() {
     assert_eq!(fund_before.available_balance, 5_000u64);
 
     // Withdraw from insurance fund
-    client.withdraw_from_insurance_fund(&admin, &2_000u64).unwrap();
+    client
+        .withdraw_from_insurance_fund(&admin, &2_000u64)
+        .unwrap();
 
     let fund_after = client.get_insurance_fund_state().unwrap();
     assert_eq!(fund_after.available_balance, 3_000u64);
@@ -2726,7 +2740,9 @@ fn test_insurance_lifecycle_complete() {
 
     // Step 4: Fund insurance for potential claims
     mint_to(&env, &token_addr, &admin, 20_000);
-    client.deposit_to_insurance_fund(&admin, &10_000u64).unwrap();
+    client
+        .deposit_to_insurance_fund(&admin, &10_000u64)
+        .unwrap();
 
     // Step 5: Verify fund state
     let fund = client.get_insurance_fund_state().unwrap();
@@ -2750,6 +2766,9 @@ fn test_insurance_lifecycle_complete() {
         final_fund.available_balance,
         10_000u64 + premium - claim_amount
     );
+}
+
+#[test]
 fn test_unpause_restores_deposit() {
     let env = Env::default();
     env.mock_all_auths();
