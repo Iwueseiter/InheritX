@@ -1,51 +1,33 @@
-//! HTTP response caching primitives for InheritX.
+//! Caching infrastructure for InheritX.
 //!
-//! This module provides:
-//! - ETag generation (SHA-256 of canonical JSON, Base64URL-encoded strong ETag)
-//! - `If-None-Match` header parsing and ETag comparison
-//! - `Cache-Control` header builders for public/private/no-store policies
-//! - Helpers to build `304 Not Modified` and inject cache headers into `200` responses
-//!
-//! # Usage pattern in a GET handler
-//!
-//! ```rust,ignore
-//! async fn get_something(
-//!     State(state): State<Arc<AppState>>,
-//!     headers: HeaderMap,
-//!     // ...other extractors
-//! ) -> Result<Response, ApiError> {
-//!     let data = SomeService::fetch(&state.db, ...).await?;
-//!
-//!     let etag = cache::compute_etag(&data);
-//!     if cache::is_not_modified(&headers, &etag) {
-//!         return Ok(cache::not_modified_response(&etag));
-//!     }
-//!
-//!     let body = Json(json!({ "status": "success", "data": data }));
-//!     let mut response = body.into_response();
-//!     cache::apply_cache_headers(&mut response, &etag, cache::cache_control_private(60));
-//!     Ok(response)
-//! }
-//! ```
+//! This module provides two layers of caching:
+//! 1. **HTTP Response Caching**: Stateless ETag generation and conditional GET helpers.
+//! 2. **Application Data Caching**: Redis or In-memory backed service for shared data.
 
 use axum::{
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use serde::Serialize;
+use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
+use crate::api_error::ApiError;
+use redis::AsyncCommands;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::RwLock;
+use tracing::warn;
 
-// ── ETag computation ──────────────────────────────────────────────────────────
+// =============================================================================
+// Layer 1: HTTP Response Caching (Stateless ETags)
+// =============================================================================
 
 /// Compute a strong ETag for any serializable value.
 ///
 /// The ETag is the SHA-256 hash of the canonical JSON representation,
 /// Base64URL-encoded (no padding), wrapped in double quotes as required
 /// by RFC 7232: `"<hash>"`.
-///
-/// Returns the same ETag for the same data regardless of call order, making
-/// it safe to use as a stable cache key.
 pub fn compute_etag<T: Serialize>(data: &T) -> String {
     let json = serde_json::to_string(data).unwrap_or_default();
     let mut hasher = Sha256::new();
@@ -53,8 +35,6 @@ pub fn compute_etag<T: Serialize>(data: &T) -> String {
     let hash = hasher.finalize();
     format!("\"{}\"", URL_SAFE_NO_PAD.encode(hash))
 }
-
-// ── Conditional-request helpers ───────────────────────────────────────────────
 
 /// Extract the raw value of the `If-None-Match` request header, if present.
 pub fn parse_if_none_match(headers: &HeaderMap) -> Option<String> {
@@ -66,11 +46,6 @@ pub fn parse_if_none_match(headers: &HeaderMap) -> Option<String> {
 
 /// Return `true` when the supplied ETag matches the client's `If-None-Match`
 /// header value, meaning the cached response is still fresh.
-///
-/// Handles:
-/// - Exact match: `"abc123" == "abc123"`
-/// - Wildcard:    `If-None-Match: *` always matches
-/// - Multi-value: `"abc123", "def456"` — matches if any value matches
 pub fn etag_matches(etag: &str, if_none_match: &str) -> bool {
     let inm = if_none_match.trim();
     if inm == "*" {
@@ -90,12 +65,7 @@ pub fn is_not_modified(headers: &HeaderMap, etag: &str) -> bool {
     }
 }
 
-// ── Cache-Control builders ────────────────────────────────────────────────────
-
 /// `public, max-age=<seconds>, must-revalidate`
-///
-/// Use for responses that are safe to store in shared caches (CDN, proxies)
-/// and that do not contain user-specific data.
 pub fn cache_control_public(max_age_secs: u32) -> HeaderValue {
     HeaderValue::from_str(&format!(
         "public, max-age={max_age_secs}, must-revalidate"
@@ -104,9 +74,6 @@ pub fn cache_control_public(max_age_secs: u32) -> HeaderValue {
 }
 
 /// `private, max-age=<seconds>, must-revalidate`
-///
-/// Use for responses that contain user-specific data that must not be stored
-/// in shared caches.
 pub fn cache_control_private(max_age_secs: u32) -> HeaderValue {
     HeaderValue::from_str(&format!(
         "private, max-age={max_age_secs}, must-revalidate"
@@ -115,20 +82,11 @@ pub fn cache_control_private(max_age_secs: u32) -> HeaderValue {
 }
 
 /// `no-store`
-///
-/// Use for write-endpoint responses (POST / PUT / DELETE) and any endpoint
-/// whose data must never be cached.
 pub fn cache_control_no_store() -> HeaderValue {
     HeaderValue::from_static("no-store")
 }
 
-// ── Response builders ─────────────────────────────────────────────────────────
-
 /// Build a `304 Not Modified` response with the given ETag.
-///
-/// Per RFC 7232 §4.1 the response MUST include `ETag` and SHOULD retain the
-/// `Cache-Control` header from the original response so the client can update
-/// its freshness information.
 pub fn not_modified_response(etag: &str) -> Response {
     let etag_value = HeaderValue::from_str(etag).unwrap_or_else(|_| HeaderValue::from_static(""));
     (
@@ -156,21 +114,231 @@ pub fn not_modified_response_with_cc(etag: &str, cache_control: HeaderValue) -> 
 
 /// Inject `ETag`, `Cache-Control`, and `Vary: Accept-Encoding` headers into
 /// an existing `200 OK` response.
-///
-/// This mutates the response in-place so the handler can build its response
-/// normally and then call this as a final decoration step.
 pub fn apply_cache_headers(response: &mut Response, etag: &str, cache_control: HeaderValue) {
     let headers = response.headers_mut();
     if let Ok(etag_value) = HeaderValue::from_str(etag) {
         headers.insert(header::ETAG, etag_value);
     }
     headers.insert(header::CACHE_CONTROL, cache_control);
-    // Vary: Accept-Encoding ensures compressed vs. uncompressed responses are
-    // stored separately in any intermediary cache.
     headers.insert(
         header::VARY,
         HeaderValue::from_static("Accept-Encoding"),
     );
+}
+
+// =============================================================================
+// Layer 2: Application Data Caching (Shared Service)
+// =============================================================================
+
+#[derive(Debug, Clone)]
+struct InMemoryCacheEntry {
+    value_json: String,
+    expires_at_secs: u64,
+}
+
+#[derive(Clone)]
+enum CacheBackend {
+    Redis(redis::aio::ConnectionManager),
+    InMemory(Arc<RwLock<HashMap<String, InMemoryCacheEntry>>>),
+}
+
+#[derive(Clone)]
+pub struct CacheService {
+    backend: CacheBackend,
+    pub default_ttl_secs: u64,
+    pub plans_ttl_secs: u64,
+    pub user_profile_ttl_secs: u64,
+}
+
+impl CacheService {
+    pub async fn from_env() -> Self {
+        let default_ttl_secs = read_u64("CACHE_DEFAULT_TTL_SECS", 60);
+        let plans_ttl_secs = read_u64("CACHE_PLANS_TTL_SECS", 90);
+        let user_profile_ttl_secs = read_u64("CACHE_USER_PROFILE_TTL_SECS", 120);
+
+        let backend = if let Ok(redis_url) = std::env::var("REDIS_URL") {
+            if let Ok(client) = redis::Client::open(redis_url) {
+                match client.get_connection_manager().await {
+                    Ok(conn) => {
+                        tracing::info!("Cache backend initialised with Redis");
+                        CacheBackend::Redis(conn)
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Failed to initialise Redis cache backend, falling back to in-memory cache");
+                        CacheBackend::InMemory(Arc::new(RwLock::new(HashMap::new())))
+                    }
+                }
+            } else {
+                warn!("Invalid REDIS_URL provided, falling back to in-memory cache");
+                CacheBackend::InMemory(Arc::new(RwLock::new(HashMap::new())))
+            }
+        } else {
+            tracing::info!("REDIS_URL not set, using in-memory cache backend");
+            CacheBackend::InMemory(Arc::new(RwLock::new(HashMap::new())))
+        };
+
+        Self {
+            backend,
+            default_ttl_secs,
+            plans_ttl_secs,
+            user_profile_ttl_secs,
+        }
+    }
+
+    pub async fn get_json<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>, ApiError> {
+        match &self.backend {
+            CacheBackend::Redis(manager) => {
+                let mut conn = manager.clone();
+                let cached: Option<String> = conn.get(key).await.map_err(|e| {
+                    ApiError::ExternalService(format!("Redis get failed for key '{key}': {e}"))
+                })?;
+
+                match cached {
+                    Some(raw) => {
+                        metrics::counter!("cache_hits_total", "keyspace" => keyspace(key).to_string())
+                            .increment(1);
+                        let parsed = serde_json::from_str::<T>(&raw).map_err(|e| {
+                            ApiError::Internal(anyhow::anyhow!(
+                                "Failed to deserialize cached value for key {}: {}",
+                                key,
+                                e
+                            ))
+                        })?;
+                        Ok(Some(parsed))
+                    }
+                    None => {
+                        metrics::counter!("cache_misses_total", "keyspace" => keyspace(key).to_string())
+                            .increment(1);
+                        Ok(None)
+                    }
+                }
+            }
+            CacheBackend::InMemory(store) => {
+                let now = now_secs();
+                let maybe_value = {
+                    let guard = store.read().await;
+                    guard.get(key).cloned()
+                };
+
+                if let Some(entry) = maybe_value {
+                    if entry.expires_at_secs > now {
+                        metrics::counter!("cache_hits_total", "keyspace" => keyspace(key).to_string())
+                            .increment(1);
+                        let parsed = serde_json::from_str::<T>(&entry.value_json).map_err(|e| {
+                            ApiError::Internal(anyhow::anyhow!(
+                                "Failed to deserialize in-memory cached value for key {}: {}",
+                                key,
+                                e
+                            ))
+                        })?;
+                        return Ok(Some(parsed));
+                    }
+
+                    // Expired entry cleanup.
+                    let mut guard = store.write().await;
+                    guard.remove(key);
+                }
+
+                metrics::counter!("cache_misses_total", "keyspace" => keyspace(key).to_string())
+                    .increment(1);
+                Ok(None)
+            }
+        }
+    }
+
+    pub async fn set_json<T: Serialize>(
+        &self,
+        key: &str,
+        value: &T,
+        ttl_secs: u64,
+    ) -> Result<(), ApiError> {
+        let payload = serde_json::to_string(value)
+            .map_err(|e| ApiError::Internal(anyhow::anyhow!("Cache serialize failed: {e}")))?;
+
+        match &self.backend {
+            CacheBackend::Redis(manager) => {
+                let mut conn = manager.clone();
+                conn.set_ex::<_, _, ()>(key, payload, ttl_secs)
+                    .await
+                    .map_err(|e| {
+                        ApiError::ExternalService(format!("Redis set_ex failed for key '{key}': {e}"))
+                    })?;
+            }
+            CacheBackend::InMemory(store) => {
+                let expires_at_secs = now_secs().saturating_add(ttl_secs);
+                let mut guard = store.write().await;
+                guard.insert(
+                    key.to_string(),
+                    InMemoryCacheEntry {
+                        value_json: payload,
+                        expires_at_secs,
+                    },
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn invalidate(&self, key: &str) -> Result<(), ApiError> {
+        match &self.backend {
+            CacheBackend::Redis(manager) => {
+                let mut conn = manager.clone();
+                let _: usize = conn.del(key).await.map_err(|e| {
+                    ApiError::ExternalService(format!("Redis delete failed for key '{key}': {e}"))
+                })?;
+            }
+            CacheBackend::InMemory(store) => {
+                let mut guard = store.write().await;
+                guard.remove(key);
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn invalidate_prefix(&self, prefix: &str) -> Result<u64, ApiError> {
+        match &self.backend {
+            CacheBackend::Redis(manager) => {
+                let mut conn = manager.clone();
+                let pattern = format!("{prefix}*");
+                let keys: Vec<String> = conn.keys(pattern).await.map_err(|e| {
+                    ApiError::ExternalService(format!("Redis key lookup failed for prefix '{prefix}': {e}"))
+                })?;
+                let deleted = if keys.is_empty() {
+                    0
+                } else {
+                    conn.del(keys).await.map_err(|e| {
+                        ApiError::ExternalService(format!("Redis prefix delete failed: {e}"))
+                    })?
+                };
+                Ok(deleted)
+            }
+            CacheBackend::InMemory(store) => {
+                let mut guard = store.write().await;
+                let before = guard.len();
+                guard.retain(|k, _| !k.starts_with(prefix));
+                Ok((before.saturating_sub(guard.len())) as u64)
+            }
+        }
+    }
+}
+
+fn keyspace(key: &str) -> &str {
+    key.split(':').next().unwrap_or("default")
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn read_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(default)
 }
 
 // ── Unit tests ────────────────────────────────────────────────────────────────
