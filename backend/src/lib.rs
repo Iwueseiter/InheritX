@@ -3,6 +3,7 @@ pub mod analytics;
 pub mod api_error;
 pub mod api_versioning;
 pub mod app;
+pub mod cache;
 pub mod auth;
 pub mod beneficiary_sync;
 pub mod circuit_breaker;
