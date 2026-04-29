@@ -18,7 +18,10 @@ use tower::ServiceExt; // for `oneshot`
 // ── Helper ────────────────────────────────────────────────────────────────────
 
 /// Extract the first header value as a string.
-fn get_header<'a>(response: &'a axum::response::Response, name: header::HeaderName) -> Option<&'a str> {
+fn get_header<'a>(
+    response: &'a axum::response::Response,
+    name: header::HeaderName,
+) -> Option<&'a str> {
     response.headers().get(name).and_then(|v| v.to_str().ok())
 }
 
@@ -107,10 +110,7 @@ fn is_not_modified_true_when_etag_matches() {
     let etag = cache::compute_etag(&data);
 
     let mut headers = HeaderMap::new();
-    headers.insert(
-        header::IF_NONE_MATCH,
-        HeaderValue::from_str(&etag).unwrap(),
-    );
+    headers.insert(header::IF_NONE_MATCH, HeaderValue::from_str(&etag).unwrap());
 
     assert!(cache::is_not_modified(&headers, &etag));
 }
@@ -212,9 +212,9 @@ async fn not_modified_response_has_etag_header() {
 /// Build a minimal router with just the health endpoint wired up with caching.
 /// (Tests that don't need a database use this lightweight router.)
 fn health_router() -> Router {
-    use axum::{routing::get, Json};
     use axum::http::HeaderMap;
     use axum::response::IntoResponse;
+    use axum::{routing::get, Json};
 
     Router::new().route(
         "/health",
@@ -222,7 +222,10 @@ fn health_router() -> Router {
             let data = json!({ "status": "ok", "message": "App is healthy" });
             let etag = cache::compute_etag(&data);
             if cache::is_not_modified(&headers, &etag) {
-                return cache::not_modified_response_with_cc(&etag, cache::cache_control_public(10));
+                return cache::not_modified_response_with_cc(
+                    &etag,
+                    cache::cache_control_public(10),
+                );
             }
             let mut response = Json(data).into_response();
             cache::apply_cache_headers(&mut response, &etag, cache::cache_control_public(10));
@@ -358,7 +361,10 @@ async fn post_endpoint_has_no_store_cache_control() {
         .expect("POST response must have Cache-Control header")
         .to_str()
         .unwrap();
-    assert_eq!(cc, "no-store", "POST must set Cache-Control: no-store, got: {cc}");
+    assert_eq!(
+        cc, "no-store",
+        "POST must set Cache-Control: no-store, got: {cc}"
+    );
 }
 
 #[tokio::test]

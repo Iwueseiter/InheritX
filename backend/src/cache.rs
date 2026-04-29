@@ -4,15 +4,15 @@
 //! 1. **HTTP Response Caching**: Stateless ETag generation and conditional GET helpers.
 //! 2. **Application Data Caching**: Redis or In-memory backed service for shared data.
 
+use crate::api_error::ApiError;
 use axum::{
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use serde::{Serialize, de::DeserializeOwned};
-use sha2::{Digest, Sha256};
-use crate::api_error::ApiError;
 use redis::AsyncCommands;
+use serde::{de::DeserializeOwned, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -67,18 +67,12 @@ pub fn is_not_modified(headers: &HeaderMap, etag: &str) -> bool {
 
 /// `public, max-age=<seconds>, must-revalidate`
 pub fn cache_control_public(max_age_secs: u32) -> HeaderValue {
-    HeaderValue::from_str(&format!(
-        "public, max-age={max_age_secs}, must-revalidate"
-    ))
-    .unwrap()
+    HeaderValue::from_str(&format!("public, max-age={max_age_secs}, must-revalidate")).unwrap()
 }
 
 /// `private, max-age=<seconds>, must-revalidate`
 pub fn cache_control_private(max_age_secs: u32) -> HeaderValue {
-    HeaderValue::from_str(&format!(
-        "private, max-age={max_age_secs}, must-revalidate"
-    ))
-    .unwrap()
+    HeaderValue::from_str(&format!("private, max-age={max_age_secs}, must-revalidate")).unwrap()
 }
 
 /// `no-store`
@@ -120,10 +114,7 @@ pub fn apply_cache_headers(response: &mut Response, etag: &str, cache_control: H
         headers.insert(header::ETAG, etag_value);
     }
     headers.insert(header::CACHE_CONTROL, cache_control);
-    headers.insert(
-        header::VARY,
-        HeaderValue::from_static("Accept-Encoding"),
-    );
+    headers.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
 }
 
 // =============================================================================
@@ -261,7 +252,9 @@ impl CacheService {
                 conn.set_ex::<_, _, ()>(key, payload, ttl_secs)
                     .await
                     .map_err(|e| {
-                        ApiError::ExternalService(format!("Redis set_ex failed for key '{key}': {e}"))
+                        ApiError::ExternalService(format!(
+                            "Redis set_ex failed for key '{key}': {e}"
+                        ))
                     })?;
             }
             CacheBackend::InMemory(store) => {
@@ -302,7 +295,9 @@ impl CacheService {
                 let mut conn = manager.clone();
                 let pattern = format!("{prefix}*");
                 let keys: Vec<String> = conn.keys(pattern).await.map_err(|e| {
-                    ApiError::ExternalService(format!("Redis key lookup failed for prefix '{prefix}': {e}"))
+                    ApiError::ExternalService(format!(
+                        "Redis key lookup failed for prefix '{prefix}': {e}"
+                    ))
                 })?;
                 let deleted = if keys.is_empty() {
                     0
@@ -396,10 +391,7 @@ mod tests {
         let data = json!({ "id": 99 });
         let etag = compute_etag(&data);
         let mut headers = HeaderMap::new();
-        headers.insert(
-            header::IF_NONE_MATCH,
-            HeaderValue::from_str(&etag).unwrap(),
-        );
+        headers.insert(header::IF_NONE_MATCH, HeaderValue::from_str(&etag).unwrap());
         assert!(is_not_modified(&headers, &etag));
     }
 
